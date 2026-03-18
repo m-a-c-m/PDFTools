@@ -140,12 +140,15 @@ export default function PDFTools({ locale = "es" }: Props) {
     if (!images.length) return;
     setGenerating(true);
     setPreviewUrl(null);
+    let doc: InstanceType<Awaited<typeof import("jspdf")>["jsPDF"]> | null = null;
     try {
       const { jsPDF } = await import("jspdf");
       const marginMm = margin === "none" ? 0 : margin === "small" ? 10 : 20;
-      const doc = new jsPDF({ orientation, unit: "mm", format: pageSize });
+      doc = new jsPDF({ orientation, unit: "mm", format: pageSize });
 
       for (let i = 0; i < images.length; i++) {
+        // Yield to UI thread between pages so the browser doesn't freeze
+        await new Promise<void>((r) => setTimeout(r, 0));
         if (i > 0) doc.addPage(pageSize, orientation);
 
         const pw = doc.internal.pageSize.getWidth();
@@ -206,11 +209,18 @@ export default function PDFTools({ locale = "es" }: Props) {
         doc.addImage(finalUrl, fmt, dx, dy, dw, dh);
       }
 
-      const blob = doc.output("blob");
-      const url = URL.createObjectURL(blob);
-      setPreviewUrl(url);
+      // Try to show preview; fall back to direct download if it fails
+      try {
+        const blob = doc.output("blob");
+        const url = URL.createObjectURL(blob);
+        setPreviewUrl(url);
+      } catch {
+        doc.save("images.pdf");
+      }
     } catch (err) {
       console.error(err);
+      // Last-resort fallback: if doc was created, try direct download
+      try { doc?.save("images.pdf"); } catch { /* nothing */ }
     } finally {
       setGenerating(false);
     }
