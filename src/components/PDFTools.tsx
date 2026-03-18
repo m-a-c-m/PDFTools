@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import {
   FiUpload,
   FiDownload,
@@ -8,6 +8,7 @@ import {
   FiChevronUp,
   FiChevronDown,
   FiX,
+  FiRefreshCw,
 } from "react-icons/fi";
 import { MdPictureAsPdf, MdImage } from "react-icons/md";
 
@@ -40,6 +41,8 @@ export default function PDFTools({ locale = "es" }: Props) {
   const [orientation, setOrientation] = useState<Orientation>("portrait");
   const [margin, setMargin] = useState<Margin>("normal");
   const [generating, setGenerating] = useState(false);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  const pdfPreviewUrlRef = useRef<string | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
@@ -50,11 +53,28 @@ export default function PDFTools({ locale = "es" }: Props) {
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [removing, setRemoving] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pageThumbnails, setPageThumbnails] = useState<string[]>([]);
+  const [thumbnailsLoading, setThumbnailsLoading] = useState(false);
+  const thumbnailRenderIdRef = useRef(0);
   const pdfInputRef = useRef<HTMLInputElement>(null);
+
+  // Cleanup preview URL on unmount
+  useEffect(() => {
+    return () => {
+      if (pdfPreviewUrlRef.current) URL.revokeObjectURL(pdfPreviewUrlRef.current);
+    };
+  }, []);
+
+  const setPreviewUrl = (url: string | null) => {
+    if (pdfPreviewUrlRef.current) URL.revokeObjectURL(pdfPreviewUrlRef.current);
+    pdfPreviewUrlRef.current = url;
+    setPdfPreviewUrl(url);
+  };
 
   // ── Image loading ────────────────────────────────────────────────────────
 
   const loadImages = useCallback((files: FileList | File[]) => {
+    setPreviewUrl(null);
     const accepted = Array.from(files).filter((f) =>
       f.type.startsWith("image/")
     );
@@ -65,17 +85,21 @@ export default function PDFTools({ locale = "es" }: Props) {
       name: f.name,
     }));
     setImages((prev) => [...prev, ...newItems]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const removeImage = useCallback((id: string) => {
+    setPreviewUrl(null);
     setImages((prev) => {
       const item = prev.find((i) => i.id === id);
       if (item) URL.revokeObjectURL(item.previewUrl);
       return prev.filter((i) => i.id !== id);
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const moveImage = useCallback((idx: number, dir: -1 | 1) => {
+    setPreviewUrl(null);
     setImages((prev) => {
       const next = [...prev];
       const target = idx + dir;
@@ -83,6 +107,7 @@ export default function PDFTools({ locale = "es" }: Props) {
       [next[idx], next[target]] = [next[target], next[idx]];
       return next;
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Drag reorder ─────────────────────────────────────────────────────────
@@ -94,6 +119,7 @@ export default function PDFTools({ locale = "es" }: Props) {
   };
   const handleDrop = (idx: number) => {
     if (dragIndex === null || dragIndex === idx) return;
+    setPreviewUrl(null);
     setImages((prev) => {
       const next = [...prev];
       const [moved] = next.splice(dragIndex, 1);
@@ -113,6 +139,7 @@ export default function PDFTools({ locale = "es" }: Props) {
   const generatePdf = useCallback(async () => {
     if (!images.length) return;
     setGenerating(true);
+    setPreviewUrl(null);
     try {
       const { jsPDF } = await import("jspdf");
       const marginMm = margin === "none" ? 0 : margin === "small" ? 10 : 20;
@@ -124,14 +151,12 @@ export default function PDFTools({ locale = "es" }: Props) {
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
 
-        // Read as dataUrl for jsPDF
         const dataUrl = await new Promise<string>((resolve) => {
           const reader = new FileReader();
           reader.onload = () => resolve(reader.result as string);
           reader.readAsDataURL(images[i].file);
         });
 
-        // Get actual image dimensions
         const img = new Image();
         await new Promise<void>((resolve) => {
           img.onload = () => resolve();
@@ -140,13 +165,11 @@ export default function PDFTools({ locale = "es" }: Props) {
         const iw = img.naturalWidth;
         const ih = img.naturalHeight;
 
-        // Determine format
         const mime = images[i].file.type;
         let fmt: "JPEG" | "PNG" | "WEBP" = "PNG";
         if (mime === "image/jpeg") fmt = "JPEG";
         else if (mime === "image/webp") fmt = "WEBP";
 
-        // Convert GIF/BMP to PNG via canvas
         let finalUrl = dataUrl;
         if (mime === "image/gif" || mime === "image/bmp") {
           const canvas = document.createElement("canvas");
@@ -157,7 +180,6 @@ export default function PDFTools({ locale = "es" }: Props) {
           fmt = "PNG";
         }
 
-        // Calculate draw rect
         const areaW = pw - 2 * marginMm;
         const areaH = ph - 2 * marginMm;
         let dx: number, dy: number, dw: number, dh: number;
@@ -175,7 +197,6 @@ export default function PDFTools({ locale = "es" }: Props) {
           dx = (pw - dw) / 2;
           dy = (ph - dh) / 2;
         } else {
-          // original — px to mm at 96dpi
           dw = iw * 0.2646;
           dh = ih * 0.2646;
           dx = (pw - dw) / 2;
@@ -185,25 +206,74 @@ export default function PDFTools({ locale = "es" }: Props) {
         doc.addImage(finalUrl, fmt, dx, dy, dw, dh);
       }
 
-      doc.save("images.pdf");
+      const blob = doc.output("blob");
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
     } catch (err) {
       console.error(err);
     } finally {
       setGenerating(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [images, fitMode, pageSize, orientation, margin]);
+
+  const downloadGeneratedPdf = () => {
+    if (!pdfPreviewUrl) return;
+    const a = document.createElement("a");
+    a.href = pdfPreviewUrl;
+    a.download = "images.pdf";
+    a.click();
+  };
 
   // ── Load PDF for page removal ────────────────────────────────────────────
 
   const loadPdf = useCallback(async (file: File) => {
     setPdfError(null);
+    setPageThumbnails([]);
+    setThumbnailsLoading(false);
+    const myRenderId = ++thumbnailRenderIdRef.current;
+
     try {
       const { PDFDocument } = await import("pdf-lib");
       const bytes = await file.arrayBuffer();
       const doc = await PDFDocument.load(bytes);
-      setPageCount(doc.getPageCount());
+      const count = doc.getPageCount();
+      setPageCount(count);
       setPdfFile(file);
       setSelectedPages(new Set());
+
+      // Render thumbnails (non-blocking)
+      setThumbnailsLoading(true);
+      (async () => {
+        try {
+          const pdfjsLib = await import("pdfjs-dist");
+          pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+          const bytes2 = await file.arrayBuffer();
+          const pdfDoc = await pdfjsLib.getDocument({ data: bytes2 }).promise;
+          const maxPages = Math.min(count, 60);
+          const thumbs: string[] = [];
+          for (let i = 1; i <= maxPages; i++) {
+            if (thumbnailRenderIdRef.current !== myRenderId) return; // stale
+            const page = await pdfDoc.getPage(i);
+            const viewport = page.getViewport({ scale: 0.4 });
+            const canvas = document.createElement("canvas");
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            await page.render({ canvas, viewport }).promise;
+            thumbs.push(canvas.toDataURL("image/jpeg", 0.75));
+            if (i % 6 === 0) setPageThumbnails([...thumbs]);
+          }
+          if (thumbnailRenderIdRef.current === myRenderId) {
+            setPageThumbnails([...thumbs]);
+          }
+        } catch (err) {
+          console.warn("Thumbnail render failed:", err);
+        } finally {
+          if (thumbnailRenderIdRef.current === myRenderId) {
+            setThumbnailsLoading(false);
+          }
+        }
+      })();
     } catch {
       setPdfError(
         isEs
@@ -269,6 +339,16 @@ export default function PDFTools({ locale = "es" }: Props) {
       setRemoving(false);
     }
   }, [pdfFile, selectedPages, pageCount, isEs]);
+
+  const resetPdf = () => {
+    thumbnailRenderIdRef.current++;
+    setPdfFile(null);
+    setPageCount(0);
+    setSelectedPages(new Set());
+    setPdfError(null);
+    setPageThumbnails([]);
+    setThumbnailsLoading(false);
+  };
 
   // ── Drop zone helpers ────────────────────────────────────────────────────
 
@@ -354,7 +434,7 @@ export default function PDFTools({ locale = "es" }: Props) {
               {(["fit", "fill", "original"] as FitMode[]).map((m) => (
                 <button
                   key={m}
-                  onClick={() => setFitMode(m)}
+                  onClick={() => { setFitMode(m); setPreviewUrl(null); }}
                   className={`px-3 py-1.5 transition-colors capitalize ${
                     fitMode === m
                       ? "bg-primary/20 text-primary"
@@ -365,7 +445,7 @@ export default function PDFTools({ locale = "es" }: Props) {
                     ? isEs ? "Ajustar" : "Fit"
                     : m === "fill"
                     ? isEs ? "Rellenar" : "Fill"
-                    : isEs ? "Original" : "Original"}
+                    : "Original"}
                 </button>
               ))}
             </div>
@@ -375,7 +455,7 @@ export default function PDFTools({ locale = "es" }: Props) {
               {(["a4", "letter"] as PageSize[]).map((s) => (
                 <button
                   key={s}
-                  onClick={() => setPageSize(s)}
+                  onClick={() => { setPageSize(s); setPreviewUrl(null); }}
                   className={`px-3 py-1.5 transition-colors uppercase ${
                     pageSize === s
                       ? "bg-primary/20 text-primary"
@@ -392,7 +472,7 @@ export default function PDFTools({ locale = "es" }: Props) {
               {(["portrait", "landscape"] as Orientation[]).map((o) => (
                 <button
                   key={o}
-                  onClick={() => setOrientation(o)}
+                  onClick={() => { setOrientation(o); setPreviewUrl(null); }}
                   className={`px-3 py-1.5 transition-colors ${
                     orientation === o
                       ? "bg-primary/20 text-primary"
@@ -411,7 +491,7 @@ export default function PDFTools({ locale = "es" }: Props) {
               {(["none", "small", "normal"] as Margin[]).map((m) => (
                 <button
                   key={m}
-                  onClick={() => setMargin(m)}
+                  onClick={() => { setMargin(m); setPreviewUrl(null); }}
                   className={`px-3 py-1.5 transition-colors ${
                     margin === m
                       ? "bg-primary/20 text-primary"
@@ -429,7 +509,7 @@ export default function PDFTools({ locale = "es" }: Props) {
 
             {images.length > 0 && (
               <button
-                onClick={() => setImages([])}
+                onClick={() => { setImages([]); setPreviewUrl(null); }}
                 className="ml-auto flex items-center gap-1 rounded-lg border border-border/40 bg-surface/60 px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-red-500/40 hover:text-red-400"
               >
                 <FiTrash2 className="text-xs" />
@@ -455,14 +535,12 @@ export default function PDFTools({ locale = "es" }: Props) {
                       : "border-border/30"
                   } bg-surface/40 overflow-hidden`}
                 >
-                  {/* Preview */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={img.previewUrl}
                     alt={img.name}
                     className="aspect-square w-full object-cover"
                   />
-                  {/* Overlay */}
                   <div className="absolute inset-0 flex flex-col justify-between p-1.5 opacity-0 transition-opacity group-hover:opacity-100 bg-black/40">
                     <div className="flex justify-end gap-1">
                       <button
@@ -490,7 +568,6 @@ export default function PDFTools({ locale = "es" }: Props) {
                       {idx + 1}. {img.name}
                     </span>
                   </div>
-                  {/* Page number badge */}
                   <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-white group-hover:opacity-0 transition-opacity">
                     {idx + 1}
                   </span>
@@ -522,11 +599,41 @@ export default function PDFTools({ locale = "es" }: Props) {
                 disabled={generating}
                 className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
               >
-                <FiDownload />
+                {pdfPreviewUrl ? (
+                  <FiRefreshCw className={generating ? "animate-spin" : ""} />
+                ) : (
+                  <FiDownload />
+                )}
                 {generating
                   ? isEs ? "Generando…" : "Generating…"
-                  : isEs ? "Descargar PDF" : "Download PDF"}
+                  : pdfPreviewUrl
+                  ? isEs ? "Regenerar PDF" : "Regenerate PDF"
+                  : isEs ? "Generar PDF" : "Generate PDF"}
               </button>
+            </div>
+          )}
+
+          {/* PDF Preview */}
+          {pdfPreviewUrl && (
+            <div className="rounded-xl border border-border/30 bg-surface/20 overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-border/20">
+                <span className="text-sm font-medium text-text-muted">
+                  {isEs ? "Vista previa" : "Preview"}
+                </span>
+                <button
+                  onClick={downloadGeneratedPdf}
+                  className="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90"
+                >
+                  <FiDownload className="text-xs" />
+                  {isEs ? "Descargar PDF" : "Download PDF"}
+                </button>
+              </div>
+              <iframe
+                src={pdfPreviewUrl}
+                title={isEs ? "Vista previa del PDF" : "PDF Preview"}
+                className="w-full"
+                style={{ height: "520px", border: "none" }}
+              />
             </div>
           )}
 
@@ -570,16 +677,16 @@ export default function PDFTools({ locale = "es" }: Props) {
                   <p className="text-xs text-text-muted/60">
                     {pageCount} {isEs ? "páginas" : "pages"} ·{" "}
                     {(pdfFile.size / 1024 / 1024).toFixed(2)} MB
+                    {thumbnailsLoading && (
+                      <span className="ml-2 text-primary/60">
+                        {isEs ? "· Cargando vistas previas…" : "· Loading previews…"}
+                      </span>
+                    )}
                   </p>
                 </div>
               </div>
               <button
-                onClick={() => {
-                  setPdfFile(null);
-                  setPageCount(0);
-                  setSelectedPages(new Set());
-                  setPdfError(null);
-                }}
+                onClick={resetPdf}
                 className="rounded-lg border border-border/40 px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-red-500/40 hover:text-red-400"
               >
                 {isEs ? "Cambiar" : "Change"}
@@ -625,28 +732,60 @@ export default function PDFTools({ locale = "es" }: Props) {
                 </button>
               </div>
 
-              <div className="grid grid-cols-4 gap-3 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8">
-                {Array.from({ length: pageCount }, (_, i) => (
-                  <button
-                    key={i}
-                    onClick={() => togglePage(i)}
-                    className={`flex flex-col items-center gap-1.5 rounded-xl border-2 p-3 transition-all ${
-                      selectedPages.has(i)
-                        ? "border-red-500/60 bg-red-500/10 text-red-400"
-                        : "border-border/30 bg-surface/40 text-text-muted hover:border-primary/40"
-                    }`}
-                  >
-                    <MdPictureAsPdf className="text-xl" />
-                    <span className="text-[11px] font-semibold leading-none">
-                      {i + 1}
-                    </span>
-                    {selectedPages.has(i) && (
-                      <span className="text-[9px] leading-none">
-                        {isEs ? "Eliminar" : "Remove"}
+              <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+                {Array.from({ length: pageCount }, (_, i) => {
+                  const thumb = pageThumbnails[i];
+                  const isSelected = selectedPages.has(i);
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => togglePage(i)}
+                      className={`group relative flex flex-col items-center gap-1.5 rounded-xl border-2 overflow-hidden transition-all ${
+                        isSelected
+                          ? "border-red-500/60"
+                          : "border-border/30 hover:border-primary/40"
+                      }`}
+                    >
+                      {/* Thumbnail or skeleton */}
+                      <div className="relative w-full aspect-[3/4] bg-surface/60">
+                        {thumb ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={thumb}
+                            alt={`Page ${i + 1}`}
+                            className="absolute inset-0 h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            {thumbnailsLoading ? (
+                              <div className="h-5 w-5 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
+                            ) : (
+                              <MdPictureAsPdf className="text-2xl text-text-muted/40" />
+                            )}
+                          </div>
+                        )}
+                        {/* Selected overlay */}
+                        {isSelected && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-red-500/40">
+                            <FiX className="text-2xl text-white drop-shadow" />
+                          </div>
+                        )}
+                        {/* Page number badge */}
+                        <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                          {i + 1}
+                        </span>
+                      </div>
+                      {/* Label */}
+                      <span className={`pb-1.5 text-[11px] font-semibold leading-none ${
+                        isSelected ? "text-red-400" : "text-text-muted"
+                      }`}>
+                        {isSelected
+                          ? isEs ? "Eliminar" : "Remove"
+                          : `${isEs ? "Pág." : "P."} ${i + 1}`}
                       </span>
-                    )}
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </div>
 
               {/* Stats + action */}
