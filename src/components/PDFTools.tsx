@@ -147,7 +147,7 @@ export default function PDFTools({ locale = "es" }: Props) {
       doc = new jsPDF({ orientation, unit: "mm", format: pageSize });
 
       for (let i = 0; i < images.length; i++) {
-        // Yield to UI thread between pages so the browser doesn't freeze
+        // Yield to UI thread so the browser doesn't freeze with many images
         await new Promise<void>((r) => setTimeout(r, 0));
         if (i > 0) doc.addPage(pageSize, orientation);
 
@@ -209,7 +209,7 @@ export default function PDFTools({ locale = "es" }: Props) {
         doc.addImage(finalUrl, fmt, dx, dy, dw, dh);
       }
 
-      // Try to show preview; fall back to direct download if it fails
+      // Try preview; fall back to direct download if blob URL fails
       try {
         const blob = doc.output("blob");
         const url = URL.createObjectURL(blob);
@@ -219,7 +219,7 @@ export default function PDFTools({ locale = "es" }: Props) {
       }
     } catch (err) {
       console.error(err);
-      // Last-resort fallback: if doc was created, try direct download
+      // Last-resort: direct download if doc was partially built
       try { doc?.save("images.pdf"); } catch { /* nothing */ }
     } finally {
       setGenerating(false);
@@ -360,6 +360,21 @@ export default function PDFTools({ locale = "es" }: Props) {
     setThumbnailsLoading(false);
   };
 
+  // ── Clipboard paste (Tab 1 only) ─────────────────────────────────────────
+
+  useEffect(() => {
+    if (tab !== "images-to-pdf") return;
+    const onPaste = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.items ?? [])
+        .filter((i) => i.type.startsWith("image/"))
+        .map((i) => i.getAsFile())
+        .filter(Boolean) as File[];
+      if (files.length) loadImages(files);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [tab, loadImages]);
+
   // ── Drop zone helpers ────────────────────────────────────────────────────
 
   const handleImgDrop = (e: React.DragEvent) => {
@@ -417,8 +432,8 @@ export default function PDFTools({ locale = "es" }: Props) {
             <div className="text-center">
               <p className="text-sm font-medium text-text-muted">
                 {isEs
-                  ? "Arrastra imágenes aquí o haz clic para seleccionar"
-                  : "Drag images here or click to select"}
+                  ? "Arrastra imágenes aquí, haz clic o pega con Ctrl+V"
+                  : "Drag images here, click or paste with Ctrl+V"}
               </p>
               <p className="mt-1 text-xs text-text-muted/50">
                 JPG, PNG, WebP, GIF, BMP
