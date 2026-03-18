@@ -43,6 +43,9 @@ export default function PDFTools({ locale = "es" }: Props) {
   const [generating, setGenerating] = useState(false);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const pdfPreviewUrlRef = useRef<string | null>(null);
+  // null = auto (>30 imgs activates), true/false = manual override
+  const [compressOverride, setCompressOverride] = useState<boolean | null>(null);
+  const compressImages = compressOverride !== null ? compressOverride : images.length > 30;
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
@@ -168,19 +171,44 @@ export default function PDFTools({ locale = "es" }: Props) {
         const iw = img.naturalWidth;
         const ih = img.naturalHeight;
 
-        const mime = images[i].file.type;
-        let fmt: "JPEG" | "PNG" | "WEBP" = "PNG";
-        if (mime === "image/jpeg") fmt = "JPEG";
-        else if (mime === "image/webp") fmt = "WEBP";
+        let finalUrl: string;
+        let fmt: "JPEG" | "PNG" | "WEBP";
+        let fw = iw, fh = ih; // dimensions used for layout
 
-        let finalUrl = dataUrl;
-        if (mime === "image/gif" || mime === "image/bmp") {
+        if (compressImages) {
+          // Scale down to max 2000px and compress to JPEG 85%
+          const MAX_DIM = 2000;
+          let sw = iw, sh = ih;
+          if (sw > MAX_DIM || sh > MAX_DIM) {
+            const s = Math.min(MAX_DIM / sw, MAX_DIM / sh);
+            sw = Math.round(sw * s);
+            sh = Math.round(sh * s);
+          }
           const canvas = document.createElement("canvas");
-          canvas.width = iw;
-          canvas.height = ih;
-          canvas.getContext("2d")!.drawImage(img, 0, 0);
-          finalUrl = canvas.toDataURL("image/png");
+          canvas.width = sw;
+          canvas.height = sh;
+          const ctx = canvas.getContext("2d")!;
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, sw, sh);
+          ctx.drawImage(img, 0, 0, sw, sh);
+          finalUrl = canvas.toDataURL("image/jpeg", 0.85);
+          fmt = "JPEG";
+          fw = sw;
+          fh = sh;
+        } else {
+          const mime = images[i].file.type;
           fmt = "PNG";
+          if (mime === "image/jpeg") fmt = "JPEG";
+          else if (mime === "image/webp") fmt = "WEBP";
+          finalUrl = dataUrl;
+          if (mime === "image/gif" || mime === "image/bmp") {
+            const canvas = document.createElement("canvas");
+            canvas.width = iw;
+            canvas.height = ih;
+            canvas.getContext("2d")!.drawImage(img, 0, 0);
+            finalUrl = canvas.toDataURL("image/png");
+            fmt = "PNG";
+          }
         }
 
         const areaW = pw - 2 * marginMm;
@@ -188,20 +216,20 @@ export default function PDFTools({ locale = "es" }: Props) {
         let dx: number, dy: number, dw: number, dh: number;
 
         if (fitMode === "fit") {
-          const scale = Math.min(areaW / iw, areaH / ih);
-          dw = iw * scale;
-          dh = ih * scale;
+          const scale = Math.min(areaW / fw, areaH / fh);
+          dw = fw * scale;
+          dh = fh * scale;
           dx = marginMm + (areaW - dw) / 2;
           dy = marginMm + (areaH - dh) / 2;
         } else if (fitMode === "fill") {
-          const scale = Math.max(pw / iw, ph / ih);
-          dw = iw * scale;
-          dh = ih * scale;
+          const scale = Math.max(pw / fw, ph / fh);
+          dw = fw * scale;
+          dh = fh * scale;
           dx = (pw - dw) / 2;
           dy = (ph - dh) / 2;
         } else {
-          dw = iw * 0.2646;
-          dh = ih * 0.2646;
+          dw = fw * 0.2646;
+          dh = fh * 0.2646;
           dx = (pw - dw) / 2;
           dy = (ph - dh) / 2;
         }
@@ -225,7 +253,7 @@ export default function PDFTools({ locale = "es" }: Props) {
       setGenerating(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [images, fitMode, pageSize, orientation, margin]);
+  }, [images, fitMode, pageSize, orientation, margin, compressImages]);
 
   const downloadGeneratedPdf = () => {
     if (!pdfPreviewUrl) return;
@@ -598,6 +626,39 @@ export default function PDFTools({ locale = "es" }: Props) {
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Compression banner — visible when >15 images */}
+          {images.length > 15 && (
+            <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm transition-colors ${
+              compressImages
+                ? "border-green-500/30 bg-green-500/10"
+                : "border-amber-500/30 bg-amber-500/10"
+            }`}>
+              <div className="flex flex-col gap-0.5">
+                <span className={`font-medium text-sm ${compressImages ? "text-green-400" : "text-amber-400"}`}>
+                  {compressImages
+                    ? isEs ? "✓ Compresión activa" : "✓ Compression active"
+                    : isEs ? "⚠ PDF grande detectado" : "⚠ Large PDF detected"}
+                </span>
+                <span className="text-xs text-text-muted/60">
+                  {compressImages
+                    ? isEs ? "JPEG 85% · máx 2000px · ~10x menos memoria" : "JPEG 85% · max 2000px · ~10x less memory"
+                    : isEs ? "Con muchas imágenes puede fallar. Activa la compresión para procesar sin errores." : "With many images it may fail. Enable compression to process without errors."}
+                </span>
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 select-none">
+                <span className="text-xs text-text-muted">
+                  {isEs ? "Comprimir imágenes" : "Compress images"}
+                </span>
+                <div
+                  onClick={() => setCompressOverride(!compressImages)}
+                  className={`relative h-5 w-9 rounded-full transition-colors ${compressImages ? "bg-green-500" : "bg-border/60"}`}
+                >
+                  <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${compressImages ? "translate-x-4" : "translate-x-0.5"}`} />
+                </div>
+              </label>
             </div>
           )}
 
